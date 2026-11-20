@@ -1,4 +1,4 @@
-name: Build Pumpkin (shield fix)
+name: Build Pumpkin (patch set)
 
 on:
   workflow_dispatch:
@@ -8,26 +8,26 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     steps:
+      - name: Get the patches
+        uses: actions/checkout@v4
+
       - name: Download Pumpkin source
         run: |
           curl -L --fail -o pumpkin.tar.gz "https://api.github.com/repos/Pumpkin-MC/Pumpkin/tarball/0.2.2%2B26.3-26.60"
           mkdir -p src
           tar -xzf pumpkin.tar.gz -C src --strip-components=1
 
-      - name: Apply the shield fix
+      - name: Apply patches
         run: |
+          set -e
           cd src
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("crates/pumpkin-core/src/entity/player.rs")
-          s = p.read_text()
-          old = "            None,\n            Some(self),\n            Some(self),\n        ) {"
-          new = "            Some(attacker_entity.pos.load()),\n            Some(self),\n            Some(self),\n        ) {"
-          n = s.count(old)
-          assert n == 1, f"expected 1 match, found {n}"
-          p.write_text(s.replace(old, new))
-          print("shield fix applied")
-          PY
+          count=0
+          for p in ../patches/*.patch; do
+            echo "== applying $(basename "$p")"
+            patch -p1 --batch --fuzz=0 < "$p"
+            count=$((count+1))
+          done
+          echo "== applied $count patch(es)"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -45,5 +45,5 @@ jobs:
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: pumpkin-linux-shieldfix
+          name: pumpkin-linux
           path: src/target/release/pumpkin
