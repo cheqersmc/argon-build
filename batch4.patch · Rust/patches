@@ -1,1 +1,101 @@
-
+--- a/crates/pumpkin-core/src/item/items/spear.rs
++++ b/crates/pumpkin-core/src/item/items/spear.rs
+@@ -85,7 +85,12 @@
+         let tps = f64::from(server.basic_config.tps);
+         let attack_delay = tps / Self::attack_speed(player, stack);
+         let elapsed = f64::from(player.last_attacked_ticks.load(Ordering::Acquire));
+-        if elapsed + 5.0 < attack_delay {
++        // A spear with Lunge may dash again immediately: the attack cooldown only gates the
++        // damage part, like swapping attributes to drop the spear's cooldown in PvP.
++        let has_lunge = stack
++            .get_data_component::<EnchantmentsImpl>()
++            .is_some_and(|e| e.enchantment.iter().any(|(en, _)| **en == Enchantment::LUNGE));
++        if !has_lunge && elapsed + 5.0 < attack_delay {
+             return;
+         }
+ 
+--- a/crates/pumpkin-core/src/entity/living.rs
++++ b/crates/pumpkin-core/src/entity/living.rs
+@@ -3959,7 +3959,17 @@
+     }
+ 
+     pub fn damage(&self, caller: &dyn EntityBase, amount: f32, damage_type: DamageType) -> bool {
+-        self.damage_with_context(caller, amount, damage_type, None, None, None)
++        // Vanilla always knows the attacker and where it stands. Passing None here made the
++        // shield branch unreachable, so every mob using this wrapper hit straight through a
++        // raised shield, and knockback had no direction either.
++        self.damage_with_context(
++            caller,
++            amount,
++            damage_type,
++            Some(caller.get_entity().pos.load()),
++            Some(caller),
++            Some(caller),
++        )
+     }
+ 
+     /// Vanilla `LivingEntity.dealDefaultKnockback`.
+--- a/crates/pumpkin-core/src/entity/player.rs
++++ b/crates/pumpkin-core/src/entity/player.rs
+@@ -1696,7 +1696,11 @@
+                 SoundCategory::Players,
+                 &self.living_entity.entity.pos.load(),
+             );
+-            return;
++            // A mace smash continues even when the hit is absorbed, so the ground impact
++            // sound and the Wind Burst launch still happen.
++            if !is_mace_smash {
++                return;
++            }
+         }
+ 
+         if is_mace_smash && damage >= 100.0 {
+--- a/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
++++ b/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+@@ -97,6 +97,7 @@
+         // Vanilla wind charge is a wind burst, not an explosion: no block damage, no
+         // explosion sound, and everything near the centre is pushed away with an
+         // upward bias, so the thrower is launched too.
++        let mut pushed: Vec<uuid::Uuid> = Vec::new();
+         for entity in world.get_nearby_entities(position, radius).into_values() {
+             let offset = entity
+                 .get_entity()
+@@ -110,10 +111,38 @@
+                 continue;
+             }
+             let strength = (1.0 - (distance / radius)).clamp(0.0, 1.0) * 1.22;
++            pushed.push(entity.get_entity().entity_uuid);
+             entity.get_entity().add_velocity(
+                 offset
+                     .normalize()
+                     .multiply(strength, strength * 0.5 + 0.25, strength),
++            );
++        }
++        // Players are tracked separately from the entity list on some paths; push them too so
++        // the thrower always gets launched.
++        let radius_squared = radius * radius;
++        for player in world.players.load().iter() {
++            let player_entity = player.get_entity();
++            if pushed.contains(&player_entity.entity_uuid) {
++                continue;
++            }
++            let player_pos = player_entity.pos.load();
++            if player_pos.squared_distance_to_vec(&position) > radius_squared {
++                continue;
++            }
++            let offset = player_pos
++                .add(&Vector3::new(0.0, 0.5, 0.0))
++                .sub(&position);
++            let distance = offset.length();
++            if distance < 0.0001 {
++                player_entity.add_velocity(Vector3::new(0.0, 0.6, 0.0));
++                continue;
++            }
++            let strength = (1.0 - (distance / radius)).clamp(0.0, 1.0) * 1.22;
++            player_entity.add_velocity(
++                offset
++                    .normalize()
++                    .multiply(strength, strength * 0.5 + 0.25, strength),
+             );
+         }
+         world.play_sound(
