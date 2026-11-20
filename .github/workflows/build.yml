@@ -1,1 +1,49 @@
+name: Build Pumpkin (shield fix)
 
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Download Pumpkin source
+        run: |
+          curl -L --fail -o pumpkin.tar.gz "https://api.github.com/repos/Pumpkin-MC/Pumpkin/tarball/0.2.2%2B26.3-26.60"
+          mkdir -p src
+          tar -xzf pumpkin.tar.gz -C src --strip-components=1
+
+      - name: Apply the shield fix
+        run: |
+          cd src
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("crates/pumpkin-core/src/entity/player.rs")
+          s = p.read_text()
+          old = "            None,\n            Some(self),\n            Some(self),\n        ) {"
+          new = "            Some(attacker_entity.pos.load()),\n            Some(self),\n            Some(self),\n        ) {"
+          n = s.count(old)
+          assert n == 1, f"expected 1 match, found {n}"
+          p.write_text(s.replace(old, new))
+          print("shield fix applied")
+          PY
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: |
+          cd src
+          cargo build --release --bin pumpkin
+
+      - name: Show result
+        run: |
+          ls -lh src/target/release/pumpkin
+          sha256sum src/target/release/pumpkin
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: pumpkin-linux-shieldfix
+          path: src/target/release/pumpkin
