@@ -1,1 +1,48 @@
-
+--- a/crates/pumpkin-core/src/item/items/spear.rs
++++ b/crates/pumpkin-core/src/item/items/spear.rs
+@@ -19,7 +19,7 @@
+ use pumpkin_data::entity::{EntityStatus, EntityType};
+ use pumpkin_data::item::Item;
+ use pumpkin_data::item_stack::ItemStack;
+-use pumpkin_data::sound::SoundCategory;
++use pumpkin_data::sound::{Sound, SoundCategory};
+ use pumpkin_data::tag::Taggable;
+ use pumpkin_data::{Enchantment, tag};
+ use pumpkin_protocol::bedrock::server::actor_event::ActorEventID;
+@@ -125,6 +125,36 @@
+         if let Some(sound) = piercing.sound.as_ref() {
+             world.play_sound_event_expect(player, sound, SoundCategory::Players, &position);
+         }
++        // Lunge: a spear jab launches the attacker horizontally. It costs hunger
++        // (3/4/5 points for level 1/2/3), and vanilla refuses it below 6 hunger.
++        if let Some(enchantments) = stack.get_data_component::<EnchantmentsImpl>() {
++            for (enchantment, level) in enchantments.enchantment.iter() {
++                if **enchantment != Enchantment::LUNGE {
++                    continue;
++                }
++                if player.get_food_level() < 6 {
++                    break;
++                }
++                let lunge_level = i32::from(*level).clamp(1, 3);
++                let (yaw, _) = player.rotation();
++                let yaw_rad = f64::from(yaw).to_radians();
++                let speed = 0.7 + 0.15 * f64::from(lunge_level);
++                let current = player.living_entity.entity.velocity.load();
++                player.living_entity.entity.set_velocity(Vector3::new(
++                    -yaw_rad.sin() * speed,
++                    current.y.max(0.0) + 0.2,
++                    yaw_rad.cos() * speed,
++                ));
++                player.add_exhaustion(4.0 * (2.0 + f64::from(lunge_level)));
++                let sound = match lunge_level {
++                    1 => Sound::ItemSpearLunge1,
++                    2 => Sound::ItemSpearLunge2,
++                    _ => Sound::ItemSpearLunge3,
++                };
++                world.play_sound(sound, SoundCategory::Players, &position);
++                break;
++            }
++        }
+         player.swing_hand(Hand::Right, false);
+     }
+ 
