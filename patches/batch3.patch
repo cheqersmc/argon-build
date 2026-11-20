@@ -33,7 +33,7 @@
 +                    current.y.max(0.0) + 0.2,
 +                    yaw_rad.cos() * speed,
 +                ));
-+                player.add_exhaustion(4.0 * (2.0 + f64::from(lunge_level)));
++                player.add_exhaustion((4.0 * (2.0 + f64::from(lunge_level))) as f32);
 +                let sound = match lunge_level {
 +                    1 => Sound::ItemSpearLunge1,
 +                    2 => Sound::ItemSpearLunge2,
