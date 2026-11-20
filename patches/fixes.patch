@@ -1,1 +1,77 @@
+--- a/crates/pumpkin-core/src/entity/player.rs
++++ b/crates/pumpkin-core/src/entity/player.rs
+@@ -1685,7 +1685,9 @@
+                     .get_data_component::<pumpkin_data::data_component_impl::DamageTypeImpl>()
+                     .map_or(DamageType::PLAYER_ATTACK, |dt| dt.damage_type)
+             },
+-            None,
++            // Shield fix: melee used to pass no hit position, so LivingEntity::damage_with_context
++            // skipped its shield-block branch entirely (it requires Some(position)).
++            Some(attacker_entity.pos.load()),
+             Some(self),
+             Some(self),
+         ) {
 
+--- a/crates/pumpkin-core/src/net/java/play/use_item.rs
++++ b/crates/pumpkin-core/src/net/java/play/use_item.rs
+@@ -84,6 +84,13 @@
+     }
+ 
+     fn prepare_hand_item_for_use(player: &Arc<Player>, hand: Hand, held: &mut ItemStack) {
++        // A raised shield that gets disabled by an axe must stay down for the whole
++        // cooldown. The cooldown itself is already started in LivingEntity, but this
++        // function raises the shield before the registry ever consults cooldowns, so
++        // without this check the player can simply raise it again.
++        if player.is_on_cooldown(&held.item.registry_key.to_string()) {
++            return;
++        }
+         let inventory = player.inventory();
+ 
+         if let Some(cooldown) = held.get_use_cooldown() {
+
+--- a/crates/pumpkin-core/src/item/registry.rs
++++ b/crates/pumpkin-core/src/item/registry.rs
+@@ -61,8 +61,12 @@
+             pumpkin_item.normal_use_with_hand(item, player, yaw, pitch, hand);
+         }
+ 
++        // Items that take time to use (eating, drinking) must only start their
++        // cooldown once the use actually finishes, which LivingEntity already does.
++        // Starting it here as well made chorus fruit show its cooldown on click.
+         if let Some(cooldown) = cooldown
+             && self.get_use_duration(item.id).is_none()
++            && stack.get_max_use_time() <= 0
+         {
+             player.start_cooldown(cooldown_group, (cooldown.seconds * 20.0) as i32);
+         }
+
+--- a/crates/pumpkin-core/src/item/items/minecart.rs
++++ b/crates/pumpkin-core/src/item/items/minecart.rs
+@@ -79,6 +79,19 @@
+                 .is_ascending()
+         };
+         let height = if is_ascending { 0.5 } else { 0.0 };
++        // Align the cart with the rail it is placed on. Without this the entity keeps
++        // yaw 0, so it renders at the wrong angle on east-west and curved rails.
++        let rail_shape = if PoweredRailLikeProperties::handles_block_id(block.id) {
++            PoweredRailLikeProperties::from_state_id(state_id).shape.to_value()
++        } else {
++            RailLikeProperties::from_state_id(state_id).shape.to_value()
++        };
++        let yaw: f32 = match rail_shape {
++            "east_west" | "ascending_east" | "ascending_west" => 90.0,
++            "south_east" | "north_east" => 45.0,
++            "south_west" | "north_west" => -45.0,
++            _ => 0.0,
++        };
+         let entity_type = Self::item_to_entity(item.item);
+         let pos = location.to_f64();
+         let entity = Entity::new(
+@@ -86,6 +99,7 @@
+             Vector3::new(pos.x + 0.5, pos.y + 0.0625 + height, pos.z + 0.5),
+             entity_type,
+         );
++        entity.set_rotation(yaw, 0.0);
+         let minecart_entity = Arc::new(MinecartEntity::new(entity));
+         world.spawn_entity(minecart_entity);
+         world.emit_game_event(GameEvent::EntityPlace.name(), pos);
