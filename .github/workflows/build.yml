@@ -8,26 +8,424 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     steps:
-      - name: Get the patches
-        uses: actions/checkout@v4
-
       - name: Download Pumpkin source
         run: |
           curl -L --fail -o pumpkin.tar.gz "https://api.github.com/repos/Pumpkin-MC/Pumpkin/tarball/0.2.2%2B26.3-26.60"
           mkdir -p src
           tar -xzf pumpkin.tar.gz -C src --strip-components=1
 
-      - name: Apply patches
+      # Every local fix lives in this ONE file. Nothing else to keep in sync.
+      - name: Apply all local fixes
         run: |
           set -e
           cd src
-          count=0
-          for p in ../patches/*.patch; do
-            echo "== applying $(basename "$p")"
-            patch -p1 --batch --fuzz=0 < "$p"
-            count=$((count+1))
-          done
-          echo "== applied $count patch(es)"
+          cat > /tmp/fixes.patch <<'PATCH_EOF'
+          --- a/crates/pumpkin-core/src/entity/player.rs
+          +++ b/crates/pumpkin-core/src/entity/player.rs
+          @@ -1685,7 +1685,9 @@
+                               .get_data_component::<pumpkin_data::data_component_impl::DamageTypeImpl>()
+                               .map_or(DamageType::PLAYER_ATTACK, |dt| dt.damage_type)
+                       },
+          -            None,
+          +            // Shield fix: melee used to pass no hit position, so LivingEntity::damage_with_context
+          +            // skipped its shield-block branch entirely (it requires Some(position)).
+          +            Some(attacker_entity.pos.load()),
+                       Some(self),
+                       Some(self),
+                   ) {
+
+          --- a/crates/pumpkin-core/src/net/java/play/use_item.rs
+          +++ b/crates/pumpkin-core/src/net/java/play/use_item.rs
+          @@ -84,6 +84,13 @@
+               }
+           
+               fn prepare_hand_item_for_use(player: &Arc<Player>, hand: Hand, held: &mut ItemStack) {
+          +        // A raised shield that gets disabled by an axe must stay down for the whole
+          +        // cooldown. The cooldown itself is already started in LivingEntity, but this
+          +        // function raises the shield before the registry ever consults cooldowns, so
+          +        // without this check the player can simply raise it again.
+          +        if player.is_on_cooldown(&held.item.registry_key.to_string()) {
+          +            return;
+          +        }
+                   let inventory = player.inventory();
+           
+                   if let Some(cooldown) = held.get_use_cooldown() {
+
+          --- a/crates/pumpkin-core/src/item/registry.rs
+          +++ b/crates/pumpkin-core/src/item/registry.rs
+          @@ -61,8 +61,12 @@
+                       pumpkin_item.normal_use_with_hand(item, player, yaw, pitch, hand);
+                   }
+           
+          +        // Items that take time to use (eating, drinking) must only start their
+          +        // cooldown once the use actually finishes, which LivingEntity already does.
+          +        // Starting it here as well made chorus fruit show its cooldown on click.
+                   if let Some(cooldown) = cooldown
+                       && self.get_use_duration(item.id).is_none()
+          +            && stack.get_max_use_time() <= 0
+                   {
+                       player.start_cooldown(cooldown_group, (cooldown.seconds * 20.0) as i32);
+                   }
+
+          --- a/crates/pumpkin-core/src/item/items/minecart.rs
+          +++ b/crates/pumpkin-core/src/item/items/minecart.rs
+          @@ -79,6 +79,19 @@
+                           .is_ascending()
+                   };
+                   let height = if is_ascending { 0.5 } else { 0.0 };
+          +        // Align the cart with the rail it is placed on. Without this the entity keeps
+          +        // yaw 0, so it renders at the wrong angle on east-west and curved rails.
+          +        let rail_shape = if PoweredRailLikeProperties::handles_block_id(block.id) {
+          +            PoweredRailLikeProperties::from_state_id(state_id).shape.to_value()
+          +        } else {
+          +            RailLikeProperties::from_state_id(state_id).shape.to_value()
+          +        };
+          +        let yaw: f32 = match rail_shape {
+          +            "east_west" | "ascending_east" | "ascending_west" => 90.0,
+          +            "south_east" | "north_east" => 45.0,
+          +            "south_west" | "north_west" => -45.0,
+          +            _ => 0.0,
+          +        };
+                   let entity_type = Self::item_to_entity(item.item);
+                   let pos = location.to_f64();
+                   let entity = Entity::new(
+          @@ -86,6 +99,7 @@
+                       Vector3::new(pos.x + 0.5, pos.y + 0.0625 + height, pos.z + 0.5),
+                       entity_type,
+                   );
+          +        entity.set_rotation(yaw, 0.0);
+                   let minecart_entity = Arc::new(MinecartEntity::new(entity));
+                   world.spawn_entity(minecart_entity);
+                   world.emit_game_event(GameEvent::EntityPlace.name(), pos);
+          --- a/crates/pumpkin-core/src/entity/mob/mod.rs
+          +++ b/crates/pumpkin-core/src/entity/mob/mod.rs
+          @@ -1023,7 +1023,10 @@
+                       target,
+                       attack_damage,
+                       DamageType::MOB_ATTACK,
+          -            None,
+          +            // Same reason as Player::attack: without a hit position the shield branch in
+          +            // LivingEntity::damage_with_context is skipped, so mobs hit straight through
+          +            // a raised shield.
+          +            Some(caller.get_entity().pos.load()),
+                       Some(caller),
+                       Some(caller),
+                   );
+          --- a/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          +++ b/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          @@ -1,5 +1,6 @@
+           use crate::entity::projectile::owner::ProjectileOwner;
+           use pumpkin_data::damage::DamageType;
+          +use pumpkin_data::sound::{Sound, SoundCategory};
+           use pumpkin_data::tag;
+           use pumpkin_util::math::vector3::Vector3;
+           use std::sync::LazyLock;
+          @@ -87,15 +88,38 @@
+               }
+           
+               pub fn create_explosion(&self, position: Vector3<f64>) {
+          -        let (power, calculator) = match self.kind {
+          -            WindChargeKind::Normal { .. } => (1.2, WIND_CHARGE_EXPLOSION_DAMAGE_CALCULATOR.clone()),
+          -            WindChargeKind::Breeze => (3.0, BREEZE_WIND_CHARGE_EXPLOSION_DAMAGE_CALCULATOR.clone()),
+          +        let power = match self.kind {
+          +            WindChargeKind::Normal { .. } => 1.2f32,
+          +            WindChargeKind::Breeze => 3.0f32,
+                   };
+          -        self.get_entity().world.load().explode_with_calculator(
+          -            position,
+          -            power,
+          -            crate::world::ExplosionInteraction::Trigger,
+          -            Some(calculator),
+          +        let world = self.get_entity().world.load();
+          +        let radius = f64::from(power) * 2.0;
+          +        // Vanilla wind charge is a wind burst, not an explosion: no block damage, no
+          +        // explosion sound, and everything near the centre is pushed away with an
+          +        // upward bias, so the thrower is launched too.
+          +        for entity in world.get_nearby_entities(position, radius).into_values() {
+          +            let offset = entity
+          +                .get_entity()
+          +                .pos
+          +                .load()
+          +                .add(&Vector3::new(0.0, 0.5, 0.0))
+          +                .sub(&position);
+          +            let distance = offset.length();
+          +            if distance < 0.0001 {
+          +                entity.get_entity().add_velocity(Vector3::new(0.0, 0.6, 0.0));
+          +                continue;
+          +            }
+          +            let strength = (1.0 - (distance / radius)).clamp(0.0, 1.0) * 1.22;
+          +            entity.get_entity().add_velocity(
+          +                offset
+          +                    .normalize()
+          +                    .multiply(strength, strength * 0.5 + 0.25, strength),
+          +            );
+          +        }
+          +        world.play_sound(
+          +            Sound::EntityWindChargeWindBurst,
+          +            SoundCategory::Players,
+          +            &position,
+                   );
+               }
+           
+          --- a/crates/pumpkin-core/src/entity/player.rs
+          +++ b/crates/pumpkin-core/src/entity/player.rs
+          @@ -1711,10 +1711,11 @@
+                               if **enchantment == Enchantment::WIND_BURST {
+                                   let boost_y = 0.5 + 0.25 * (*level as f64);
+                                   let vel = self.living_entity.entity.velocity.load();
+          +                        // Use set_velocity so the launch is actually sent to the client;
+          +                        // storing the field alone leaves the player on the ground.
+                                   self.living_entity
+                                       .entity
+          -                            .velocity
+          -                            .store(Vector3::new(vel.x, boost_y, vel.z));
+          +                            .set_velocity(Vector3::new(vel.x, boost_y, vel.z));
+                               }
+                           }
+                       }
+          --- a/crates/pumpkin-core/src/item/items/spear.rs
+          +++ b/crates/pumpkin-core/src/item/items/spear.rs
+          @@ -19,7 +19,7 @@
+           use pumpkin_data::entity::{EntityStatus, EntityType};
+           use pumpkin_data::item::Item;
+           use pumpkin_data::item_stack::ItemStack;
+          -use pumpkin_data::sound::SoundCategory;
+          +use pumpkin_data::sound::{Sound, SoundCategory};
+           use pumpkin_data::tag::Taggable;
+           use pumpkin_data::{Enchantment, tag};
+           use pumpkin_protocol::bedrock::server::actor_event::ActorEventID;
+          @@ -125,6 +125,36 @@
+                   if let Some(sound) = piercing.sound.as_ref() {
+                       world.play_sound_event_expect(player, sound, SoundCategory::Players, &position);
+                   }
+          +        // Lunge: a spear jab launches the attacker horizontally. It costs hunger
+          +        // (3/4/5 points for level 1/2/3), and vanilla refuses it below 6 hunger.
+          +        if let Some(enchantments) = stack.get_data_component::<EnchantmentsImpl>() {
+          +            for (enchantment, level) in enchantments.enchantment.iter() {
+          +                if **enchantment != Enchantment::LUNGE {
+          +                    continue;
+          +                }
+          +                if player.get_food_level() < 6 {
+          +                    break;
+          +                }
+          +                let lunge_level = i32::from(*level).clamp(1, 3);
+          +                let (yaw, _) = player.rotation();
+          +                let yaw_rad = f64::from(yaw).to_radians();
+          +                let speed = 0.7 + 0.15 * f64::from(lunge_level);
+          +                let current = player.living_entity.entity.velocity.load();
+          +                player.living_entity.entity.set_velocity(Vector3::new(
+          +                    -yaw_rad.sin() * speed,
+          +                    current.y.max(0.0) + 0.2,
+          +                    yaw_rad.cos() * speed,
+          +                ));
+          +                player.add_exhaustion((4.0 * (2.0 + f64::from(lunge_level))) as f32);
+          +                let sound = match lunge_level {
+          +                    1 => Sound::ItemSpearLunge1,
+          +                    2 => Sound::ItemSpearLunge2,
+          +                    _ => Sound::ItemSpearLunge3,
+          +                };
+          +                world.play_sound(sound, SoundCategory::Players, &position);
+          +                break;
+          +            }
+          +        }
+                   player.swing_hand(Hand::Right, false);
+               }
+           
+          --- a/crates/pumpkin-core/src/item/items/spear.rs
+          +++ b/crates/pumpkin-core/src/item/items/spear.rs
+          @@ -85,7 +85,12 @@
+                   let tps = f64::from(server.basic_config.tps);
+                   let attack_delay = tps / Self::attack_speed(player, stack);
+                   let elapsed = f64::from(player.last_attacked_ticks.load(Ordering::Acquire));
+          -        if elapsed + 5.0 < attack_delay {
+          +        // A spear with Lunge may dash again immediately: the attack cooldown only gates the
+          +        // damage part, like swapping attributes to drop the spear's cooldown in PvP.
+          +        let has_lunge = stack
+          +            .get_data_component::<EnchantmentsImpl>()
+          +            .is_some_and(|e| e.enchantment.iter().any(|(en, _)| **en == Enchantment::LUNGE));
+          +        if !has_lunge && elapsed + 5.0 < attack_delay {
+                       return;
+                   }
+           
+          --- a/crates/pumpkin-core/src/entity/living.rs
+          +++ b/crates/pumpkin-core/src/entity/living.rs
+          @@ -3959,7 +3959,17 @@
+               }
+           
+               pub fn damage(&self, caller: &dyn EntityBase, amount: f32, damage_type: DamageType) -> bool {
+          -        self.damage_with_context(caller, amount, damage_type, None, None, None)
+          +        // Vanilla always knows the attacker and where it stands. Passing None here made the
+          +        // shield branch unreachable, so every mob using this wrapper hit straight through a
+          +        // raised shield, and knockback had no direction either.
+          +        self.damage_with_context(
+          +            caller,
+          +            amount,
+          +            damage_type,
+          +            Some(caller.get_entity().pos.load()),
+          +            Some(caller),
+          +            Some(caller),
+          +        )
+               }
+           
+               /// Vanilla `LivingEntity.dealDefaultKnockback`.
+          --- a/crates/pumpkin-core/src/entity/player.rs
+          +++ b/crates/pumpkin-core/src/entity/player.rs
+          @@ -1696,7 +1696,11 @@
+                           SoundCategory::Players,
+                           &self.living_entity.entity.pos.load(),
+                       );
+          -            return;
+          +            // A mace smash continues even when the hit is absorbed, so the ground impact
+          +            // sound and the Wind Burst launch still happen.
+          +            if !is_mace_smash {
+          +                return;
+          +            }
+                   }
+           
+                   if is_mace_smash && damage >= 100.0 {
+          --- a/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          +++ b/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          @@ -97,6 +97,7 @@
+                   // Vanilla wind charge is a wind burst, not an explosion: no block damage, no
+                   // explosion sound, and everything near the centre is pushed away with an
+                   // upward bias, so the thrower is launched too.
+          +        let mut pushed: Vec<uuid::Uuid> = Vec::new();
+                   for entity in world.get_nearby_entities(position, radius).into_values() {
+                       let offset = entity
+                           .get_entity()
+          @@ -110,10 +111,38 @@
+                           continue;
+                       }
+                       let strength = (1.0 - (distance / radius)).clamp(0.0, 1.0) * 1.22;
+          +            pushed.push(entity.get_entity().entity_uuid);
+                       entity.get_entity().add_velocity(
+                           offset
+                               .normalize()
+                               .multiply(strength, strength * 0.5 + 0.25, strength),
+          +            );
+          +        }
+          +        // Players are tracked separately from the entity list on some paths; push them too so
+          +        // the thrower always gets launched.
+          +        let radius_squared = radius * radius;
+          +        for player in world.players.load().iter() {
+          +            let player_entity = player.get_entity();
+          +            if pushed.contains(&player_entity.entity_uuid) {
+          +                continue;
+          +            }
+          +            let player_pos = player_entity.pos.load();
+          +            if player_pos.squared_distance_to_vec(&position) > radius_squared {
+          +                continue;
+          +            }
+          +            let offset = player_pos
+          +                .add(&Vector3::new(0.0, 0.5, 0.0))
+          +                .sub(&position);
+          +            let distance = offset.length();
+          +            if distance < 0.0001 {
+          +                player_entity.add_velocity(Vector3::new(0.0, 0.6, 0.0));
+          +                continue;
+          +            }
+          +            let strength = (1.0 - (distance / radius)).clamp(0.0, 1.0) * 1.22;
+          +            player_entity.add_velocity(
+          +                offset
+          +                    .normalize()
+          +                    .multiply(strength, strength * 0.5 + 0.25, strength),
+                       );
+                   }
+                   world.play_sound(
+          --- a/crates/pumpkin-core/src/item/items/spear.rs
+          +++ b/crates/pumpkin-core/src/item/items/spear.rs
+          @@ -85,12 +85,9 @@
+                   let tps = f64::from(server.basic_config.tps);
+                   let attack_delay = tps / Self::attack_speed(player, stack);
+                   let elapsed = f64::from(player.last_attacked_ticks.load(Ordering::Acquire));
+          -        // A spear with Lunge may dash again immediately: the attack cooldown only gates the
+          -        // damage part, like swapping attributes to drop the spear's cooldown in PvP.
+          -        let has_lunge = stack
+          -            .get_data_component::<EnchantmentsImpl>()
+          -            .is_some_and(|e| e.enchantment.iter().any(|(en, _)| **en == Enchantment::LUNGE));
+          -        if !has_lunge && elapsed + 5.0 < attack_delay {
+          +        // Vanilla: no stab before the attack clock is full, with a 5-tick tolerance
+          +        // (ServerGamePacketListenerImpl -> cannotAttackWithItem).
+          +        if elapsed + 5.0 < attack_delay {
+                       return;
+                   }
+           
+          @@ -130,27 +127,27 @@
+                   if let Some(sound) = piercing.sound.as_ref() {
+                       world.play_sound_event_expect(player, sound, SoundCategory::Players, &position);
+                   }
+          -        // Lunge: a spear jab launches the attacker horizontally. It costs hunger
+          -        // (3/4/5 points for level 1/2/3), and vanilla refuses it below 6 hunger.
+          +        // Lunge (vanilla): 0.458 blocks/tick per level, purely horizontal, vertical motion
+          +        // is left alone. Needs 7 hunger (sprint level) and costs 4 x level exhaustion.
+                   if let Some(enchantments) = stack.get_data_component::<EnchantmentsImpl>() {
+                       for (enchantment, level) in enchantments.enchantment.iter() {
+                           if **enchantment != Enchantment::LUNGE {
+                               continue;
+                           }
+          -                if player.get_food_level() < 6 {
+          +                if player.get_food_level() < 7 {
+                               break;
+                           }
+                           let lunge_level = i32::from(*level).clamp(1, 3);
+                           let (yaw, _) = player.rotation();
+                           let yaw_rad = f64::from(yaw).to_radians();
+          -                let speed = 0.7 + 0.15 * f64::from(lunge_level);
+          +                let speed = 0.458 * f64::from(lunge_level);
+                           let current = player.living_entity.entity.velocity.load();
+                           player.living_entity.entity.set_velocity(Vector3::new(
+                               -yaw_rad.sin() * speed,
+          -                    current.y.max(0.0) + 0.2,
+          +                    current.y,
+                               yaw_rad.cos() * speed,
+                           ));
+          -                player.add_exhaustion((4.0 * (2.0 + f64::from(lunge_level))) as f32);
+          +                player.add_exhaustion((4.0 * f64::from(lunge_level)) as f32);
+                           let sound = match lunge_level {
+                               1 => Sound::ItemSpearLunge1,
+                               2 => Sound::ItemSpearLunge2,
+          --- a/crates/pumpkin-core/src/entity/player.rs
+          +++ b/crates/pumpkin-core/src/entity/player.rs
+          @@ -1712,10 +1712,13 @@
+                   if is_mace_smash {
+                       let fall_distance = self.living_entity.fall_distance.load();
+                       self.living_entity.fall_distance.store(0.0);
+          +            let mut has_wind_burst = false;
+                       if let Some(enchantments) = item_stack.get_data_component::<EnchantmentsImpl>() {
+                           for (enchantment, level) in enchantments.enchantment.iter() {
+                               if **enchantment == Enchantment::WIND_BURST {
+          -                        let boost_y = 0.5 + 0.25 * (*level as f64);
+          +                        has_wind_burst = true;
+          +                        // Vanilla launch: I ~8 blocks, II ~16, III ~24 of apex.
+          +                        let boost_y = 1.1 + 0.5 * (*level as f64 - 1.0);
+                                   let vel = self.living_entity.entity.velocity.load();
+                                   // Use set_velocity so the launch is actually sent to the client;
+                                   // storing the field alone leaves the player on the ground.
+          @@ -1725,6 +1728,13 @@
+                               }
+                           }
+                       }
+          +            if !has_wind_burst {
+          +                // A plain smash stops the attacker dead on impact (the "mid-air stop"),
+          +                // so the swing carries you no further.
+          +                self.living_entity
+          +                    .entity
+          +                    .set_velocity(Vector3::new(0.0, 0.0, 0.0));
+          +            }
+                       world.play_sound(
+                           if fall_distance > 5.0 {
+                               Sound::ItemMaceSmashGroundHeavy
+
+          PATCH_EOF
+          patch -p1 --batch --fuzz=0 < /tmp/fixes.patch
+          echo "== sanity checks =="
+          grep -q "0.458" crates/pumpkin-core/src/item/items/spear.rs
+          grep -q "get_food_level() < 7" crates/pumpkin-core/src/item/items/spear.rs
+          grep -q "has_wind_burst" crates/pumpkin-core/src/entity/player.rs
+          grep -q "1.1 + 0.5" crates/pumpkin-core/src/entity/player.rs
+          grep -q "pushed" crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          grep -q "Some(caller.get_entity().pos.load())" crates/pumpkin-core/src/entity/living.rs
+          echo "== all local fixes applied =="
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
