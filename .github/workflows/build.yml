@@ -529,17 +529,117 @@ jobs:
                    // Align the cart with the rail it is placed on. Without this the entity keeps
                    // yaw 0, so it renders at the wrong angle on east-west and curved rails.
                    let rail_shape = if PoweredRailLikeProperties::handles_block_id(block.id) {
+          --- a/crates/pumpkin-core/src/entity/player.rs
+          +++ b/crates/pumpkin-core/src/entity/player.rs
+          @@ -1671,7 +1671,18 @@
+                               enchantment.modify_fall_based_damage(*level, &mut smash_bonus_per_block);
+                           }
+                       }
+          -            damage += (1.5 + smash_bonus_per_block) * f64::from(fall_distance);
+          +            // Vanilla MaceItem.getAttackDamageBonus: 4*fall up to 3 blocks, then
+          +            // 12 + 2*(fall-3) up to 8, then 22 + (fall-8) above that. Density adds
+          +            // 0.5 per level for every fallen block.
+          +            let fall = f64::from(fall_distance);
+          +            let smash_base = if fall <= 3.0 {
+          +                4.0 * fall
+          +            } else if fall <= 8.0 {
+          +                12.0 + 2.0 * (fall - 3.0)
+          +            } else {
+          +                22.0 + (fall - 8.0)
+          +            };
+          +            damage += smash_base + smash_bonus_per_block * fall;
+                   }
+           
+                   let old_movement = victim_entity.velocity.load();
+          @@ -1729,11 +1740,16 @@
+                           }
+                       }
+                       if !has_wind_burst {
+          -                // A plain smash stops the attacker dead on impact (the "mid-air stop"),
+          -                // so the swing carries you no further.
+          +                // Vanilla MaceItem.hurtEnemy: keep the horizontal motion, pin the vertical
+          +                // component to 0.01. That is the "mid-air stop".
+          +                let vel = self.living_entity.entity.velocity.load();
+          +                self.living_entity
+          +                    .entity
+          +                    .set_velocity(Vector3::new(vel.x, 0.01, vel.z));
+                           self.living_entity
+                               .entity
+          -                    .set_velocity(Vector3::new(0.0, 0.0, 0.0));
+          +                    .velocity_dirty
+          +                    .store(true, Ordering::SeqCst);
+                       }
+                       // Vanilla spawns a gust burst at the impact of a smash attack.
+                       world.spawn_particle(
+          --- a/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          +++ b/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          @@ -93,7 +93,8 @@
+                       WindChargeKind::Breeze => 3.0f32,
+                   };
+                   let world = self.get_entity().world.load();
+          -        let radius = f64::from(power) * 2.0;
+          +        // Vanilla WindCharge.explode uses a 1.2 radius explosion with both gust emitters.
+          +        let radius = 1.2;
+                   // Vanilla wind charge is a wind burst, not an explosion: no block damage, no
+                   // explosion sound, and everything near the centre is pushed away with an
+                   // upward bias, so the thrower is launched too.
+          @@ -152,6 +153,13 @@
+                   world.spawn_particle(
+                       position,
+                       Vector3::new(0.6, 0.6, 0.6),
+          +            0.0,
+          +            1,
+          +            pumpkin_data::particle::Particle::GustEmitterSmall,
+          +        );
+          +        world.spawn_particle(
+          +            position,
+          +            Vector3::new(0.6, 0.6, 0.6),
+                       0.0,
+                       1,
+                       pumpkin_data::particle::Particle::GustEmitterLarge,
+          --- a/crates/pumpkin-core/src/entity/living.rs
+          +++ b/crates/pumpkin-core/src/entity/living.rs
+          @@ -4341,10 +4341,12 @@
+                                   .get_data_component::<ConsumableImpl>()
+                                   .is_some_and(|c| c.animation == ConsumeAnimation::Eat)
+                               {
+          -                        player.world().play_sound(
+          -                            Sound::EntityPlayerBurp,
+          +                        player.world().play_sound_raw(
+          +                            Sound::EntityPlayerBurp as u16,
+                                       SoundCategory::Players,
+                                       &player.position(),
+          +                            0.8,
+          +                            1.0,
+                                   );
+                               }
+                           }
+          --- a/crates/pumpkin-core/src/entity/projectile/ender_pearl.rs
+          +++ b/crates/pumpkin-core/src/entity/projectile/ender_pearl.rs
+          @@ -167,6 +167,11 @@
+                               pumpkin_data::damage::DamageType::ENDER_PEARL,
+                           );
+                       }
+          +            // Vanilla ThrownEnderpearl.onHit resets fall distance after teleporting, which
+          +            // is what lets a mid-air pearl catch (wind charge boost -> pearl lands) work.
+          +            if let Some(living) = owner.get_living_entity() {
+          +                living.fall_distance.store(0.0);
+          +            }
+                   }
+           
+                   world.send_entity_status(entity, EntityStatus::Death, ActorEventID::Death);
 
           PATCH_EOF
           patch -p1 --batch --fuzz=0 < /tmp/fixes.patch
           echo "== sanity checks =="
+          grep -q "4.0 * fall" crates/pumpkin-core/src/entity/player.rs
+          grep -q "let radius = 1.2;" crates/pumpkin-core/src/entity/projectile/wind_charge.rs
           grep -q "0.458" crates/pumpkin-core/src/item/items/spear.rs
           grep -q "max_reach.max(4.5)" crates/pumpkin-core/src/item/items/spear.rs
-          grep -q "velocity_dirty" crates/pumpkin-core/src/item/items/spear.rs
           grep -q "shield_pos" crates/pumpkin-core/src/entity/living.rs
           grep -q "EntityPlayerBurp" crates/pumpkin-core/src/entity/living.rs
           grep -q "GustEmitterLarge" crates/pumpkin-core/src/entity/player.rs
-          grep -q "GustEmitterLarge" crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          grep -q "wind charge boost" crates/pumpkin-core/src/entity/projectile/ender_pearl.rs
           grep -q "let height = 0.0;" crates/pumpkin-core/src/item/items/minecart.rs
           echo "== all local fixes applied =="
 
