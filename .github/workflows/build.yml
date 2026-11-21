@@ -661,6 +661,67 @@ jobs:
                        return;
                    }
            
+          --- a/crates/pumpkin-core/src/item/items/spear.rs
+          +++ b/crates/pumpkin-core/src/item/items/spear.rs
+          @@ -147,7 +147,7 @@
+                           let current = player.living_entity.entity.velocity.load();
+                           player.living_entity.entity.set_velocity(Vector3::new(
+                               -yaw_rad.sin() * speed,
+          -                    current.y,
+          +                    0.0,
+                               yaw_rad.cos() * speed,
+                           ));
+                           // Mark the velocity as changed so the movement tracker re-sends it and the
+          --- a/crates/pumpkin-core/src/entity/living.rs
+          +++ b/crates/pumpkin-core/src/entity/living.rs
+          @@ -4163,7 +4163,9 @@
+                       }
+                   }
+           
+          -        if caller.get_player().is_none() {
+          +        // Vanilla plays the eat/drink sound while the item is being used, for players as
+          +        // well as mobs. The old check skipped players, so nobody ever heard anyone eat.
+          +        {
+                       let remaining_use_ticks = self.item_use_time.load(Ordering::Relaxed);
+                       if remaining_use_ticks > 0 {
+                           let item_in_use = self
+          --- a/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          +++ b/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          @@ -111,13 +111,11 @@
+                           entity.get_entity().add_velocity(Vector3::new(0.0, 0.6, 0.0));
+                           continue;
+                       }
+          -            let strength = (1.0 - (distance / radius)).clamp(0.0, 1.0) * 1.22;
+          +            let strength = (1.0 - (distance / radius)).clamp(0.0, 1.0);
+                       pushed.push(entity.get_entity().entity_uuid);
+          -            entity.get_entity().add_velocity(
+          -                offset
+          -                    .normalize()
+          -                    .multiply(strength, strength * 0.5 + 0.25, strength),
+          -            );
+          +            entity
+          +                .get_entity()
+          +                .add_velocity(offset.normalize().multiply(strength, strength, strength));
+                   }
+                   // Players are tracked separately from the entity list on some paths; push them too so
+                   // the thrower always gets launched.
+          @@ -139,12 +137,10 @@
+                           player_entity.add_velocity(Vector3::new(0.0, 0.6, 0.0));
+                           continue;
+                       }
+          -            let strength = (1.0 - (distance / radius)).clamp(0.0, 1.0) * 1.22;
+          -            player_entity.add_velocity(
+          -                offset
+          -                    .normalize()
+          -                    .multiply(strength, strength * 0.5 + 0.25, strength),
+          -            );
+          +            // Vanilla explosion knockback: normalised direction from the blast centre,
+          +            // scaled by (1 - distance / radius) on every axis.
+          +            let strength = (1.0 - (distance / radius)).clamp(0.0, 1.0);
+          +            player_entity.add_velocity(offset.normalize().multiply(strength, strength, strength));
+                       player_entity.velocity_dirty.store(true, std::sync::atomic::Ordering::SeqCst);
+                       player.living_entity.fall_distance.store(0.0);
+                   }
 
           PATCH_EOF
           patch -p1 --batch --fuzz=0 < /tmp/fixes.patch
@@ -669,8 +730,8 @@ jobs:
           check "has_lunge" crates/pumpkin-core/src/item/items/spear.rs
           check "4.0 * fall" crates/pumpkin-core/src/entity/player.rs
           check "let radius = 1.2;" crates/pumpkin-core/src/entity/projectile/wind_charge.rs
-          check "0.458" crates/pumpkin-core/src/item/items/spear.rs
-          check "max_reach.max(4.5)" crates/pumpkin-core/src/item/items/spear.rs
+          check "multiply(strength, strength, strength)" crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          check "nobody ever heard anyone eat" crates/pumpkin-core/src/entity/living.rs
           check "shield_pos" crates/pumpkin-core/src/entity/living.rs
           check "EntityPlayerBurp" crates/pumpkin-core/src/entity/living.rs
           check "GustEmitterLarge" crates/pumpkin-core/src/entity/player.rs
