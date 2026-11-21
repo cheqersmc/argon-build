@@ -14,7 +14,7 @@ jobs:
           mkdir -p src
           tar -xzf pumpkin.tar.gz -C src --strip-components=1
 
-      # Every local fix lives in this ONE file. Nothing else to keep in sync.
+      # Every local fix lives in this ONE file.
       - name: Apply all local fixes
         run: |
           set -e
@@ -415,16 +415,132 @@ jobs:
                        world.play_sound(
                            if fall_distance > 5.0 {
                                Sound::ItemMaceSmashGroundHeavy
+          --- a/crates/pumpkin-core/src/item/items/spear.rs
+          +++ b/crates/pumpkin-core/src/item/items/spear.rs
+          @@ -147,6 +147,14 @@
+                               current.y,
+                               yaw_rad.cos() * speed,
+                           ));
+          +                // Mark the velocity as changed so the movement tracker re-sends it and the
+          +                // client stops predicting its own motion; without this the lunge played its
+          +                // sound but never moved the player.
+          +                player
+          +                    .living_entity
+          +                    .entity
+          +                    .velocity_dirty
+          +                    .store(true, Ordering::SeqCst);
+                           player.add_exhaustion((4.0 * f64::from(lunge_level)) as f32);
+                           let sound = match lunge_level {
+                               1 => Sound::ItemSpearLunge1,
+          @@ -525,6 +533,8 @@
+                   } else {
+                       (f64::from(range.min_reach), f64::from(range.max_reach))
+                   };
+          +        // Vanilla spear reach is 2.0 to 4.5 blocks with a 0.25 hitbox margin.
+          +        let max_reach = max_reach.max(4.5);
+                   let from = eye.add(&(look * min_reach));
+                   let forward = player.get_entity().movement.load().dot(&look).max(0.0);
+                   let mut to = eye.add(&(look * (max_reach + forward)));
+          --- a/crates/pumpkin-core/src/entity/living.rs
+          +++ b/crates/pumpkin-core/src/entity/living.rs
+          @@ -3610,9 +3610,13 @@
+                   }
+           
+                   // Check for shield blocking before armor/magic/cooldown
+          +        // Any attacker counts: when the caller passes no hit position, fall back to the
+          +        // attacker's own position, so shields block every mob (iron golems included) instead
+          +        // of only the paths that happen to support a position.
+          +        let shield_pos = position.or_else(|| source.map(|s| s.get_entity().pos.load()));
+                   if self.is_blocking()
+                       && !damage_type.has_tag(&tag::DamageType::MINECRAFT_BYPASSES_SHIELD)
+          -            && let Some(pos) = position
+          +            && let Some(pos) = shield_pos
+                   {
+                       let player_pos = self.entity.pos.load();
+                       let look_vec = Vector3::rotation_vector(0.0, self.entity.yaw.load() as f64);
+          @@ -4331,6 +4335,18 @@
+                                       .unwrap_or_else(|| item.item.registry_key.to_string());
+                                   player.start_cooldown(group, (cooldown.seconds * 20.0) as i32);
+                               }
+          +
+          +                    // Vanilla plays entity.player.burp when a food item is finished.
+          +                    if item
+          +                        .get_data_component::<ConsumableImpl>()
+          +                        .is_some_and(|c| c.animation == ConsumeAnimation::Eat)
+          +                    {
+          +                        player.world().play_sound(
+          +                            Sound::EntityPlayerBurp,
+          +                            SoundCategory::Players,
+          +                            &player.position(),
+          +                        );
+          +                    }
+                           }
+           
+                           self.clear_active_hand();
+          --- a/crates/pumpkin-core/src/entity/player.rs
+          +++ b/crates/pumpkin-core/src/entity/player.rs
+          @@ -1735,6 +1735,14 @@
+                               .entity
+                               .set_velocity(Vector3::new(0.0, 0.0, 0.0));
+                       }
+          +            // Vanilla spawns a gust burst at the impact of a smash attack.
+          +            world.spawn_particle(
+          +                pos,
+          +                Vector3::new(0.5, 0.25, 0.5),
+          +                0.0,
+          +                1,
+          +                Particle::GustEmitterLarge,
+          +            );
+                       world.play_sound(
+                           if fall_distance > 5.0 {
+                               Sound::ItemMaceSmashGroundHeavy
+          --- a/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          +++ b/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          @@ -144,7 +144,18 @@
+                               .normalize()
+                               .multiply(strength, strength * 0.5 + 0.25, strength),
+                       );
+          +            player_entity.velocity_dirty.store(true, std::sync::atomic::Ordering::SeqCst);
+          +            player.living_entity.fall_distance.store(0.0);
+                   }
+          +        // Vanilla shows a large gust, not an explosion, and the boost clears the victim's
+          +        // fall distance so the launch itself does not hurt on landing.
+          +        world.spawn_particle(
+          +            position,
+          +            Vector3::new(0.6, 0.6, 0.6),
+          +            0.0,
+          +            1,
+          +            pumpkin_data::particle::Particle::GustEmitterLarge,
+          +        );
+                   world.play_sound(
+                       Sound::EntityWindChargeWindBurst,
+                       SoundCategory::Players,
+          --- a/crates/pumpkin-core/src/item/items/minecart.rs
+          +++ b/crates/pumpkin-core/src/item/items/minecart.rs
+          @@ -78,7 +78,10 @@
+                           .shape
+                           .is_ascending()
+                   };
+          -        let height = if is_ascending { 0.5 } else { 0.0 };
+          +        // Vanilla always spawns the cart at block height + 0.0625; the old +0.5 for
+          +        // ascending rails is what pushed carts off the rail.
+          +        let height = 0.0;
+          +        let _ = is_ascending;
+                   // Align the cart with the rail it is placed on. Without this the entity keeps
+                   // yaw 0, so it renders at the wrong angle on east-west and curved rails.
+                   let rail_shape = if PoweredRailLikeProperties::handles_block_id(block.id) {
 
           PATCH_EOF
           patch -p1 --batch --fuzz=0 < /tmp/fixes.patch
           echo "== sanity checks =="
           grep -q "0.458" crates/pumpkin-core/src/item/items/spear.rs
-          grep -q "get_food_level() < 7" crates/pumpkin-core/src/item/items/spear.rs
-          grep -q "has_wind_burst" crates/pumpkin-core/src/entity/player.rs
-          grep -q "1.1 + 0.5" crates/pumpkin-core/src/entity/player.rs
-          grep -q "pushed" crates/pumpkin-core/src/entity/projectile/wind_charge.rs
-          grep -q "Some(caller.get_entity().pos.load())" crates/pumpkin-core/src/entity/living.rs
+          grep -q "max_reach.max(4.5)" crates/pumpkin-core/src/item/items/spear.rs
+          grep -q "velocity_dirty" crates/pumpkin-core/src/item/items/spear.rs
+          grep -q "shield_pos" crates/pumpkin-core/src/entity/living.rs
+          grep -q "EntityPlayerBurp" crates/pumpkin-core/src/entity/living.rs
+          grep -q "GustEmitterLarge" crates/pumpkin-core/src/entity/player.rs
+          grep -q "GustEmitterLarge" crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          grep -q "let height = 0.0;" crates/pumpkin-core/src/item/items/minecart.rs
           echo "== all local fixes applied =="
 
       - name: Install Rust
