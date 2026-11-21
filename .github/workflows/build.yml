@@ -748,6 +748,34 @@ jobs:
                                self.play_consume_sound(caller, item);
                            }
                            self.apply_consumable_effects(caller, item);
+          --- a/crates/pumpkin-core/src/entity/player.rs
+          +++ b/crates/pumpkin-core/src/entity/player.rs
+          @@ -1751,14 +1751,17 @@
+                               .velocity_dirty
+                               .store(true, Ordering::SeqCst);
+                       }
+          -            // Vanilla spawns a gust burst at the impact of a smash attack.
+          -            world.spawn_particle(
+          -                pos,
+          -                Vector3::new(0.5, 0.25, 0.5),
+          -                0.0,
+          -                1,
+          -                Particle::GustEmitterLarge,
+          -            );
+          +            // The gust particle belongs to Wind Burst's explosion, not to a plain smash.
+          +            // A mace without the enchantment must show no gust at all.
+          +            if has_wind_burst {
+          +                world.spawn_particle(
+          +                    pos,
+          +                    Vector3::new(0.5, 0.25, 0.5),
+          +                    0.0,
+          +                    1,
+          +                    Particle::GustEmitterLarge,
+          +                );
+          +            }
+                       world.play_sound(
+                           if fall_distance > 5.0 {
+                               Sound::ItemMaceSmashGroundHeavy
 
           PATCH_EOF
           patch -p1 --batch --fuzz=0 < /tmp/fixes.patch
