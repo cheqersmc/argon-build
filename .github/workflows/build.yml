@@ -776,6 +776,77 @@ jobs:
                        world.play_sound(
                            if fall_distance > 5.0 {
                                Sound::ItemMaceSmashGroundHeavy
+          --- a/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          +++ b/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          @@ -111,11 +111,13 @@
+                           entity.get_entity().add_velocity(Vector3::new(0.0, 0.6, 0.0));
+                           continue;
+                       }
+          -            let strength = (1.0 - (distance / radius)).clamp(0.0, 1.0);
+          +            let strength = (1.0 - (distance / radius)).clamp(0.0, 1.0) * 1.22;
+                       pushed.push(entity.get_entity().entity_uuid);
+          -            entity
+          -                .get_entity()
+          -                .add_velocity(offset.normalize().multiply(strength, strength, strength));
+          +            entity.get_entity().add_velocity(
+          +                offset
+          +                    .normalize()
+          +                    .multiply(strength, strength * 0.5 + 0.25, strength),
+          +            );
+                   }
+                   // Players are tracked separately from the entity list on some paths; push them too so
+                   // the thrower always gets launched.
+          @@ -137,10 +139,14 @@
+                           player_entity.add_velocity(Vector3::new(0.0, 0.6, 0.0));
+                           continue;
+                       }
+          -            // Vanilla explosion knockback: normalised direction from the blast centre,
+          -            // scaled by (1 - distance / radius) on every axis.
+          -            let strength = (1.0 - (distance / radius)).clamp(0.0, 1.0);
+          -            player_entity.add_velocity(offset.normalize().multiply(strength, strength, strength));
+          +            // Horizon wind.rs: PLAYER_RADIUS 1.2, PLAYER_KNOCKBACK 1.22, with the
+          +            // vertical component biased so the thrower is lifted clear of the ground.
+          +            let strength = (1.0 - (distance / radius)).clamp(0.0, 1.0) * 1.22;
+          +            player_entity.add_velocity(
+          +                offset
+          +                    .normalize()
+          +                    .multiply(strength, strength * 0.5 + 0.25, strength),
+          +            );
+                       player_entity.velocity_dirty.store(true, std::sync::atomic::Ordering::SeqCst);
+                       player.living_entity.fall_distance.store(0.0);
+                   }
+          --- a/crates/pumpkin-core/src/entity/player.rs
+          +++ b/crates/pumpkin-core/src/entity/player.rs
+          @@ -1751,6 +1751,29 @@
+                               .velocity_dirty
+                               .store(true, Ordering::SeqCst);
+                       }
+          +            // Horizon mace.rs: MaceItem.knockback pushes every creature within 3.5 blocks
+          +            // away from the victim, power 0.7 doubled when the fall exceeded 5 blocks.
+          +            {
+          +                let power = if fall_distance > 5.0 { 2.0 } else { 1.0 };
+          +                for nearby in world.get_nearby_entities(pos, 3.5).into_values() {
+          +                    let body = nearby.get_entity();
+          +                    if body.entity_uuid == victim_entity.entity_uuid {
+          +                        continue;
+          +                    }
+          +                    let offset = body.pos.load().sub(&pos);
+          +                    let distance = offset.length();
+          +                    let strength = (3.5 - distance) * 0.7 * power;
+          +                    if strength <= 0.0 || distance < 0.0001 {
+          +                        continue;
+          +                    }
+          +                    let dir = offset.normalize();
+          +                    body.add_velocity(Vector3::new(
+          +                        dir.x * strength,
+          +                        0.7,
+          +                        dir.z * strength,
+          +                    ));
+          +                }
+          +            }
+                       // The gust particle belongs to Wind Burst's explosion, not to a plain smash.
+                       // A mace without the enchantment must show no gust at all.
+                       if has_wind_burst {
 
           PATCH_EOF
           patch -p1 --batch --fuzz=0 < /tmp/fixes.patch
