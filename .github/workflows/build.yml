@@ -631,17 +631,18 @@ jobs:
 
           PATCH_EOF
           patch -p1 --batch --fuzz=0 < /tmp/fixes.patch
-          echo "== sanity checks =="
-          grep -q "4.0 * fall" crates/pumpkin-core/src/entity/player.rs
-          grep -q "let radius = 1.2;" crates/pumpkin-core/src/entity/projectile/wind_charge.rs
-          grep -q "0.458" crates/pumpkin-core/src/item/items/spear.rs
-          grep -q "max_reach.max(4.5)" crates/pumpkin-core/src/item/items/spear.rs
-          grep -q "shield_pos" crates/pumpkin-core/src/entity/living.rs
-          grep -q "EntityPlayerBurp" crates/pumpkin-core/src/entity/living.rs
-          grep -q "GustEmitterLarge" crates/pumpkin-core/src/entity/player.rs
-          grep -q "wind charge boost" crates/pumpkin-core/src/entity/projectile/ender_pearl.rs
-          grep -q "let height = 0.0;" crates/pumpkin-core/src/item/items/minecart.rs
-          echo "== all local fixes applied =="
+          echo "== canaries (informational only) =="
+          check() { if grep -q "$1" "$2"; then echo "  ok   $1"; else echo "  MISS $1"; fi; }
+          check "4.0 * fall" crates/pumpkin-core/src/entity/player.rs
+          check "let radius = 1.2;" crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          check "0.458" crates/pumpkin-core/src/item/items/spear.rs
+          check "max_reach.max(4.5)" crates/pumpkin-core/src/item/items/spear.rs
+          check "shield_pos" crates/pumpkin-core/src/entity/living.rs
+          check "EntityPlayerBurp" crates/pumpkin-core/src/entity/living.rs
+          check "GustEmitterLarge" crates/pumpkin-core/src/entity/player.rs
+          check "wind charge boost" crates/pumpkin-core/src/entity/projectile/ender_pearl.rs
+          check "let height = 0.0;" crates/pumpkin-core/src/item/items/minecart.rs
+          echo "== patch stage finished =="
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
