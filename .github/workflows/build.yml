@@ -722,20 +722,35 @@ jobs:
                        player_entity.velocity_dirty.store(true, std::sync::atomic::Ordering::SeqCst);
                        player.living_entity.fall_distance.store(0.0);
                    }
+          --- a/crates/pumpkin-core/src/entity/living.rs
+          +++ b/crates/pumpkin-core/src/entity/living.rs
+          @@ -4163,9 +4163,7 @@
+                       }
+                   }
+           
+          -        // Vanilla plays the eat/drink sound while the item is being used, for players as
+          -        // well as mobs. The old check skipped players, so nobody ever heard anyone eat.
+          -        {
+          +        if caller.get_player().is_none() {
+                       let remaining_use_ticks = self.item_use_time.load(Ordering::Relaxed);
+                       if remaining_use_ticks > 0 {
+                           let item_in_use = self
+          @@ -4209,9 +4207,9 @@
+                               );
+                           }
+           
+          -                if caller.get_player().is_none()
+          -                    && item.get_data_component::<ConsumableImpl>().is_some()
+          -                {
+          +                // One chew/drink sound when the item is consumed, for players as well, so
+          +                // nearby players hear that someone is eating.
+          +                if item.get_data_component::<ConsumableImpl>().is_some() {
+                               self.play_consume_sound(caller, item);
+                           }
+                           self.apply_consumable_effects(caller, item);
 
           PATCH_EOF
           patch -p1 --batch --fuzz=0 < /tmp/fixes.patch
-          echo "== canaries (informational) =="
-          check() { if grep -q "$1" "$2"; then echo "  ok   $1"; else echo "  MISS $1"; fi; }
-          check "has_lunge" crates/pumpkin-core/src/item/items/spear.rs
-          check "4.0 * fall" crates/pumpkin-core/src/entity/player.rs
-          check "let radius = 1.2;" crates/pumpkin-core/src/entity/projectile/wind_charge.rs
-          check "multiply(strength, strength, strength)" crates/pumpkin-core/src/entity/projectile/wind_charge.rs
-          check "nobody ever heard anyone eat" crates/pumpkin-core/src/entity/living.rs
-          check "shield_pos" crates/pumpkin-core/src/entity/living.rs
-          check "EntityPlayerBurp" crates/pumpkin-core/src/entity/living.rs
-          check "GustEmitterLarge" crates/pumpkin-core/src/entity/player.rs
-          check "wind charge boost" crates/pumpkin-core/src/entity/projectile/ender_pearl.rs
           echo "== patch stage finished =="
 
       - name: Install Rust
