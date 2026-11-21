@@ -14,7 +14,6 @@ jobs:
           mkdir -p src
           tar -xzf pumpkin.tar.gz -C src --strip-components=1
 
-      # Every local fix lives in this ONE file.
       - name: Apply all local fixes
         run: |
           set -e
@@ -628,11 +627,46 @@ jobs:
                    }
            
                    world.send_entity_status(entity, EntityStatus::Death, ActorEventID::Death);
+          --- a/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          +++ b/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          @@ -155,13 +155,6 @@
+                       Vector3::new(0.6, 0.6, 0.6),
+                       0.0,
+                       1,
+          -            pumpkin_data::particle::Particle::GustEmitterSmall,
+          -        );
+          -        world.spawn_particle(
+          -            position,
+          -            Vector3::new(0.6, 0.6, 0.6),
+          -            0.0,
+          -            1,
+                       pumpkin_data::particle::Particle::GustEmitterLarge,
+                   );
+                   world.play_sound(
+          --- a/crates/pumpkin-core/src/item/items/spear.rs
+          +++ b/crates/pumpkin-core/src/item/items/spear.rs
+          @@ -85,9 +85,12 @@
+                   let tps = f64::from(server.basic_config.tps);
+                   let attack_delay = tps / Self::attack_speed(player, stack);
+                   let elapsed = f64::from(player.last_attacked_ticks.load(Ordering::Acquire));
+          -        // Vanilla: no stab before the attack clock is full, with a 5-tick tolerance
+          -        // (ServerGamePacketListenerImpl -> cannotAttackWithItem).
+          -        if elapsed + 5.0 < attack_delay {
+          +        // A spear with Lunge may dash again immediately: the attack cooldown only gates the
+          +        // damage part, so attribute-swapping (or just clicking fast) always gets the dash.
+          +        let has_lunge = stack
+          +            .get_data_component::<EnchantmentsImpl>()
+          +            .is_some_and(|e| e.enchantment.iter().any(|(en, _)| **en == Enchantment::LUNGE));
+          +        if !has_lunge && elapsed + 5.0 < attack_delay {
+                       return;
+                   }
+           
 
           PATCH_EOF
           patch -p1 --batch --fuzz=0 < /tmp/fixes.patch
-          echo "== canaries (informational only) =="
+          echo "== canaries (informational) =="
           check() { if grep -q "$1" "$2"; then echo "  ok   $1"; else echo "  MISS $1"; fi; }
+          check "has_lunge" crates/pumpkin-core/src/item/items/spear.rs
           check "4.0 * fall" crates/pumpkin-core/src/entity/player.rs
           check "let radius = 1.2;" crates/pumpkin-core/src/entity/projectile/wind_charge.rs
           check "0.458" crates/pumpkin-core/src/item/items/spear.rs
@@ -641,7 +675,6 @@ jobs:
           check "EntityPlayerBurp" crates/pumpkin-core/src/entity/living.rs
           check "GustEmitterLarge" crates/pumpkin-core/src/entity/player.rs
           check "wind charge boost" crates/pumpkin-core/src/entity/projectile/ender_pearl.rs
-          check "let height = 0.0;" crates/pumpkin-core/src/item/items/minecart.rs
           echo "== patch stage finished =="
 
       - name: Install Rust
