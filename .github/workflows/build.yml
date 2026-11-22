@@ -51,10 +51,10 @@ jobs:
           echo "diffs in patch: $(grep -c ^--- a/ /tmp/fixes.patch)"
           cd src
           patch -p1 --batch --fuzz=0 < /tmp/fixes.patch
-          if ! grep -q "0.458 * f64::from(lunge_level)" crates/pumpkin-core/src/item/items/spear.rs; then echo "CANARY MISS: lunge 0.458"; exit 1; fi
-          if ! grep -q "ItemMaceSmashAir" crates/pumpkin-core/src/entity/player.rs; then echo "CANARY MISS: smash_air"; exit 1; fi
-          if ! grep -q ") * 1.22" crates/pumpkin-core/src/entity/projectile/wind_charge.rs; then echo "CANARY MISS: wind 1.22"; exit 1; fi
-          if ! grep -q "12.0 + 2.0 * (fall - 3.0)" crates/pumpkin-core/src/entity/player.rs; then echo "CANARY MISS: mace curve"; exit 1; fi
+          if ! grep -qF "0.458 * f64::from(lunge_level)" crates/pumpkin-core/src/item/items/spear.rs; then echo "CANARY MISS: lunge 0.458"; exit 1; fi
+          if ! grep -qF "ItemMaceSmashAir" crates/pumpkin-core/src/entity/player.rs; then echo "CANARY MISS: smash_air"; exit 1; fi
+          if ! grep -qF ") * 1.22" crates/pumpkin-core/src/entity/projectile/wind_charge.rs; then echo "CANARY MISS: wind 1.22"; exit 1; fi
+          if ! grep -qF "12.0 + 2.0 * (fall - 3.0)" crates/pumpkin-core/src/entity/player.rs; then echo "CANARY MISS: mace curve"; exit 1; fi
           echo "== all 13 patches applied and verified =="
 
       - name: Install Rust
