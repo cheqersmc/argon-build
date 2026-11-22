@@ -18,7 +18,7 @@ jobs:
         run: |
           set -e
           cd src
-          cat > /tmp/fixes.patch <<'PATCH_EOF'
+          cat > /tmp/fixes.patch <<'PATCH_EOF
           --- a/crates/pumpkin-core/src/entity/player.rs
           +++ b/crates/pumpkin-core/src/entity/player.rs
           @@ -1685,7 +1685,9 @@
@@ -847,6 +847,38 @@ jobs:
                        // The gust particle belongs to Wind Burst's explosion, not to a plain smash.
                        // A mace without the enchantment must show no gust at all.
                        if has_wind_burst {
+          --- a/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          +++ b/crates/pumpkin-core/src/entity/projectile/wind_charge.rs
+          @@ -154,7 +154,7 @@
+                   // fall distance so the launch itself does not hurt on landing.
+                   world.spawn_particle(
+                       position,
+          -            Vector3::new(0.6, 0.6, 0.6),
+          +            Vector3::new(1.0, 0.0, 0.0),
+                       0.0,
+                       1,
+                       pumpkin_data::particle::Particle::GustEmitterLarge,
+          --- a/crates/pumpkin-core/src/entity/player.rs
+          +++ b/crates/pumpkin-core/src/entity/player.rs
+          @@ -1786,10 +1786,15 @@
+                           );
+                       }
+                       world.play_sound(
+          -                if fall_distance > 5.0 {
+          -                    Sound::ItemMaceSmashGroundHeavy
+          +                if victim_entity.on_ground.load(std::sync::atomic::Ordering::Relaxed) {
+          +                    if fall_distance > 5.0 {
+          +                        Sound::ItemMaceSmashGroundHeavy
+          +                    } else {
+          +                        Sound::ItemMaceSmashGround
+          +                    }
+                           } else {
+          -                    Sound::ItemMaceSmashGround
+          +                    // Horizon mace.rs: smash_air when the victim is airborne.
+          +                    Sound::ItemMaceSmashAir
+                           },
+                           SoundCategory::Players,
+                           &pos,
 
           PATCH_EOF
           patch -p1 --batch --fuzz=0 < /tmp/fixes.patch
